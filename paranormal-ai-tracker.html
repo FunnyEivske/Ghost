@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <title>Paranormal AI Tracker</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <!-- Load Tailwind CSS for styling --><script src="https://cdn.tailwindcss.com"></script>
+  
+  <style>
+      html, body {
+          height: 100%;
+          margin: 0;
+          padding: 0;
+          overflow: hidden;
+          background-color: #000;
+      }
+      #container {
+          position: relative;
+          width: 100%;
+          height: 100%;
+          overflow: hidden;
+      }
+      /* Style the video and canvas to be layered and fill the screen */
+      #video, #outputCanvas {
+          position: absolute;
+          top: 0;
+          left: 0;
+          width: 100%;
+          height: 100%;
+          object-fit: cover;
+          /* Flip the video horizontally like a mirror (common for front cameras) */
+          transform: scaleX(-1);
+          -webkit-transform: scaleX(-1);
+      }
+      #video {
+          z-index: 10;
+          /* We don't see the video, just the AI output on the canvas */
+          opacity: 0.6; 
+          filter: grayscale(1) contrast(1.5) brightness(0.8);
+      }
+      #outputCanvas {
+          z-index: 20; /* Canvas for drawing goes on top */
+      }
+      /* Style the control panel */
+      #controls {
+          position: absolute;
+          bottom: 0;
+          left: 0;
+          width: 100%;
+          z-index: 30;
+          background: linear-gradient(to top, rgba(0,0,0,0.9), rgba(0,0,0,0));
+          padding: 20px;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          gap: 12px;
+      }
+      /* Base button style */
+      .button-base {
+          font-family: 'Inter', sans-serif;
+          font-size: 1.1rem;
+          font-weight: 600;
+          border-radius: 9999px; /* Pill shape */
+          padding: 12px 24px;
+          cursor: pointer;
+          transition: all 0.3s ease;
+      }
+      
+      /* Custom button style for Scan */
+      .scan-button {
+          color: #059669; /* Green text */
+          background-color: rgba(16, 185, 129, 0.1); /* Green glow */
+          border: 2px solid #059669;
+          box-shadow: 0 0 15px rgba(5, 150, 105, 0.5);
+      }
+      .scan-button:hover, .scan-button:disabled {
+          background-color: #059669;
+          color: #ffffff;
+          box-shadow: 0 0 25px rgba(5, 150, 105, 0.8);
+      }
+      .scan-button:disabled {
+          opacity: 0.7;
+          cursor: not-allowed;
+      }
+
+      /* Stil for Stopp-knapp */
+      .stop-button {
+          color: #EF4444; /* Rød text */
+          background-color: rgba(239, 68, 68, 0.1); /* Rød glow */
+          border: 2px solid #EF4444;
+          box-shadow: 0 0 15px rgba(239, 68, 68, 0.5);
+      }
+      .stop-button:hover {
+          background-color: #EF4444;
+          color: #ffffff;
+          box-shadow: 0 0 25px rgba(239, 68, 68, 0.8);
+      }
+
+      /* Custom button style for Model Switch */
+      .model-switch-button {
+          font-size: 0.9rem;
+          padding: 8px 16px;
+          color: #059669; /* Start with green */
+          background-color: rgba(16, 185, 129, 0.1);
+          border: 2px solid #059669;
+      }
+      .model-switch-button:disabled {
+          opacity: 0.4;
+          cursor: not-allowed;
+      }
+      
+      /* Stil for "Begge" (nøytral) */
+      .model-switch-button.both-mode {
+          color: #E5E7EB; /* Hvit/grå */
+          border-color: #E5E7EB;
+          background-color: rgba(229, 231, 235, 0.1);
+      }
+      /* Stil for "Lite" (rød) */
+      .model-switch-button.lite-mode {
+          color: #EF4444;
+          border-color: #EF4444;
+          background-color: rgba(239, 68, 68, 0.1);
+      }
+      /* Stil for "Heavy" (grønn) */
+      .model-switch-button.heavy-mode {
+          color: #059669;
+          border-color: #059669;
+          background-color: rgba(16, 185, 129, 0.1);
+      }
+
+
+      /* Status text style */
+      .status-text {
+          font-family: 'Inter', sans-serif;
+          font-size: 0.9rem;
+          color: #d1d5db; /* Light gray */
+          text-shadow: 0 0 5px rgba(0,0,0,0.7);
+      }
+  </style>
+</head>
+<body class="bg-black text-gray-200">
+
+  <div id="container">
+      <!-- Video element to display the camera feed --><video id="video" autoplay playsinline></video>
+      
+      <!-- Canvas element to draw the AI skeleton on top --><canvas id="outputCanvas"></canvas>
+
+      <!-- Control panel for the button and status messages --><div id="controls">
+          <button id="switchModelButton" class="button-base model-switch-button">
+              Laster Modeller...
+          </button>
+          <button id="scanButton" class="button-base scan-button">
+              START PARANORMAL SCAN
+          </button>
+          <!-- Separat Stopp-knapp, skjult som standard -->
+          <button id="stopButton" class="button-base stop-button hidden">
+              STOPP SKANNING
+          </button>
+          <p id="status" class="status-text">Waiting to initialize...</p>
+      </div>
+  </div>
+
+  <script type="module">
+      // NY: Importerer MediaPipe-biblioteket direkte.
+      import { 
+          PoseLandmarker, 
+          FilesetResolver, 
+          DrawingUtils 
+      } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/vision_bundle.js";
+
+      // Get DOM elements
+      const video = document.getElementById("video");
+      const canvasElement = document.getElementById("outputCanvas");
+      const canvasCtx = canvasElement.getContext("2d");
+      const scanButton = document.getElementById("scanButton");
+      const stopButton = document.getElementById("stopButton");
+      const switchModelButton = document.getElementById("switchModelButton");
+      const statusText = document.getElementById("status");
+
+      // Modell-variabler
+      let heavyPoseLandmarker; // Egen variabel for Heavy
+      let litePoseLandmarker;  // Egen variabel for Lite
+      let drawingUtils;
+      let webcamRunning = false;
+      let lastVideoTime = -1;
+
+      // NY: Lagre siste resultat fra HVER modell
+      let latestHeavyResult = null;
+      let latestLiteResult = null;
+
+      // --- Modell-konfigurasjon ---
+      let currentModel = "heavy"; // "heavy", "lite", eller "both"
+      
+      // Stier til de to modellene
+      const modelPaths = {
+          heavy: "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_heavy/float16/1/pose_landmarker_heavy.task",
+          lite: "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task"
+      };
+      
+      const modelColors = {
+          heavy: "#059669", // Grønn
+          lite: "#EF4444"    // Rød
+      };
+
+      // --- 1. NY HJELPEFUNKSJON FOR Å LASTE ÉN MODELL ---
+      async function createModelInstance(modelType, vision) {
+          return await PoseLandmarker.createFromOptions(vision, {
+              baseOptions: {
+                  modelAssetPath: modelPaths[modelType], // Bruk riktig sti
+                  delegate: "GPU"
+              },
+              runningMode: "VIDEO",
+              numPoses: 2,
+              minPoseDetectionConfidence: 0.3, 
+              minPosePresenceConfidence: 0.5,
+              minTrackingConfidence: 0.6 
+          });
+      }
+
+      // --- 2. NY HOVED-LASTEFUNKSJON (Laster BEGGE) ---
+      async function initializeApp() {
+          statusText.innerText = "Laster AI-modeller... (kan ta litt tid)";
+          scanButton.disabled = true;
+          switchModelButton.disabled = true;
+          
+          try {
+              const vision = await FilesetResolver.forVisionTasks(
+                  "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm"
+              );
+              
+              // Initialiser tegneverktøy
+              drawingUtils = new DrawingUtils(canvasCtx);
+              
+              // Bruk Promise.all til å laste begge modellene samtidig
+              statusText.innerText = "Laster Heavy (Grønn) og Lite (Rød)...";
+              [heavyPoseLandmarker, litePoseLandmarker] = await Promise.all([
+                  createModelInstance("heavy", vision),
+                  createModelInstance("lite", vision)
+              ]);
+              
+              statusText.innerText = "AI kalibrert. Trykk for å skanne.";
+              scanButton.disabled = false;
+              switchModelButton.disabled = false; // VIKTIG: Aktiver bytte-knappen
+              switchModelButton.innerText = "Modell: Heavy (Nøyaktig)"; // Sett start-tekst
+              switchModelButton.classList.add("heavy-mode");
+          } catch (error) {
+              console.error("Error loading AI models:", error);
+              statusText.innerText = "Feil: Kunne ikke laste AI-modeller.";
+          }
+      }
+
+      // --- 3. START THE WEBCAM ---
+      function enableCam() {
+          if (!heavyPoseLandmarker || !litePoseLandmarker) {
+              console.log("Vent! AI-modeller er ikke lastet ennå.");
+              return;
+          }
+
+          scanButton.disabled = true;
+          statusText.innerText = "Skanner miljøet...";
+
+          // Bytt knapper
+          scanButton.classList.add("hidden");
+          stopButton.classList.remove("hidden");
+
+          // Få tak i kamera
+          navigator.mediaDevices.getUserMedia({ 
+              video: { facingMode: "environment" } 
+          })
+          .then((stream) => {
+              video.srcObject = stream;
+              // Start prediksjonsløkken når videoen er klar
+              video.addEventListener("loadeddata", () => {
+                  webcamRunning = true;
+                  predictWebcam(); // Start den kombinerte løkken
+              });
+          })
+          .catch((err) => {
+              console.error("Error accessing webcam: ", err);
+              statusText.innerText = "Feil: Fikk ikke tilgang til kamera.";
+              // Fallback
+              navigator.mediaDevices.getUserMedia({ video: true })
+                  .then((stream) => {
+                      video.srcObject = stream;
+                      video.addEventListener("loadeddata", () => {
+                          webcamRunning = true;
+                          predictWebcam(); // Start den kombinerte løkken
+                      });
+                  })
+                  .catch((fallbackErr) => {
+                      console.error("Fallback camera error:", fallbackErr);
+                      statusText.innerText = "Feil: Kamera-tilgang nektet.";
+                      
+                      // Tilbakestill knapper ved feil
+                      webcamRunning = false;
+                      scanButton.disabled = false;
+                      scanButton.classList.remove("hidden");
+                      stopButton.classList.add("hidden");
+                  });
+          });
+      }
+
+      // --- 4. NY PREDIKSJONS- OG TEGNELØKKE (Kombinert) ---
+      function predictWebcam() {
+          if (!webcamRunning) return; // Stopp løkken hvis vi har trykket stopp
+
+          // --- 0. NY, VIKTIG FIKS FOR OPPLØSNING ---
+          // Sørg for at canvas-oppløsningen matcher video-oppløsningen
+          // Dette er KRITISK for å fjerne "pikselering"
+          if (canvasElement.width !== video.videoWidth || canvasElement.height !== video.videoHeight) {
+              canvasElement.width = video.videoWidth;
+              canvasElement.height = video.videoHeight;
+          }
+
+          // --- 1. TEGNE-DEL (Kjører hver frame) ---
+          // Denne delen tegner de *siste* resultatene vi har
+          canvasCtx.save();
+          canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+
+          let heavyFound = false;
+          let liteFound = false;
+
+          // Tegn Heavy Model (hvis aktiv og resultat finnes)
+          if ((currentModel === "heavy" || currentModel === "both") && latestHeavyResult) {
+              if (latestHeavyResult.landmarks && latestHeavyResult.landmarks.length > 0) {
+                  heavyFound = true;
+                  for (const landmarks of latestHeavyResult.landmarks) {
+                      drawingUtils.drawConnectors(landmarks, PoseLandmarker.POSE_CONNECTIONS, { color: modelColors.heavy, lineWidth: 2 }); // Endret fra 3
+                      drawingUtils.drawLandmarks(landmarks, { color: "#ffffff", fillColor: modelColors.heavy, lineWidth: 1, radius: 2 }); // Endret fra 4
+                  }
+              }
+          }
+
+          // Tegn Lite Model (hvis aktiv og resultat finnes)
+          if ((currentModel === "lite" || currentModel === "both") && latestLiteResult) {
+              if (latestLiteResult.landmarks && latestLiteResult.landmarks.length > 0) {
+                  liteFound = true;
+                  for (const landmarks of latestLiteResult.landmarks) {
+                      drawingUtils.drawConnectors(landmarks, PoseLandmarker.POSE_CONNECTIONS, { color: modelColors.lite, lineWidth: 2 }); // Endret fra 3
+                      drawingUtils.drawLandmarks(landmarks, { color: "#ffffff", fillColor: modelColors.lite, lineWidth: 1, radius: 2 }); // Endret fra 4
+                  }
+              }
+          }
+          
+          // --- 2. OPPDATER STATUS-TEKST ---
+          const modelName = currentModel.charAt(0).toUpperCase() + currentModel.slice(1);
+          if (currentModel === "both") {
+              if (heavyFound && liteFound) statusText.innerText = "!! FORM OPPDAGET (Begge Modeller) !!";
+              else if (heavyFound) statusText.innerText = "!! FORM OPPDAGET (Kun Heavy) !!";
+              else if (liteFound) statusText.innerText = "!! FORM OPPDAGET (Kun Lite) !!";
+              else statusText.innerText = "Skanner (Begge)...";
+          } else {
+              if ((heavyFound && currentModel === "heavy") || (liteFound && currentModel === "lite")) {
+                  statusText.innerText = `!! FORM OPPDAGET (${modelName}) !!`;
+              } else {
+                  statusText.innerText = `Skanner (${modelName})...`;
+              }
+          }
+
+          canvasCtx.restore();
+
+
+          // --- 3. DETEKSJONS-DEL (Kjører ved ny video-frame) ---
+          // Denne delen henter *nye* resultater for neste frame
+          let startTimeMs = performance.now();
+          if (video.currentTime !== lastVideoTime) {
+              lastVideoTime = video.currentTime;
+              
+              // Kjør BEGGE deteksjoner. De vil oppdatere 'latest' variablene.
+              if (heavyPoseLandmarker) {
+                  heavyPoseLandmarker.detectForVideo(video, startTimeMs, (result) => {
+                      latestHeavyResult = result; // Bare lagre
+                  });
+              }
+              if (litePoseLandmarker) {
+                  litePoseLandmarker.detectForVideo(video, startTimeMs, (result) => {
+                      latestLiteResult = result; // Bare lagre
+                  });
+              }
+          }
+          
+          // Be om neste frame
+          window.requestAnimationFrame(predictWebcam);
+      }
+
+
+      // --- 5. ADD EVENT LISTENERS ---
+      
+      // START-knapp
+      scanButton.addEventListener("click", () => {
+          scanButton.innerText = "STARTER...";
+          enableCam();
+      });
+
+      // STOPP-knapp
+      stopButton.addEventListener("click", () => {
+          webcamRunning = false;
+          statusText.innerText = "Skanning stoppet.";
+          if (video.srcObject) {
+              video.srcObject.getTracks().forEach(track => track.stop());
+          }
+          
+          // Tøm siste resultater
+          latestHeavyResult = null;
+          latestLiteResult = null;
+
+          // Bytt knapper tilbake
+          stopButton.classList.add("hidden");
+          scanButton.classList.remove("hidden");
+          scanButton.innerText = "START PARANORMAL SCAN";
+          scanButton.disabled = false; 
+      });
+
+      // BYTT MODELL-knapp (Fungerer nå NÅR SOM HELST)
+      switchModelButton.addEventListener("click", () => {
+          // 1. Bytt modell-pekeren
+          if (currentModel === "heavy") {
+              currentModel = "lite";
+          } else if (currentModel === "lite") {
+              currentModel = "both";
+          } else {
+              currentModel = "heavy";
+          }
+          
+          // 2. Oppdater knapp
+          // Fjern alle modus-klasser
+          switchModelButton.classList.remove("heavy-mode", "lite-mode", "both-mode");
+
+          if (currentModel === "heavy") {
+              switchModelButton.innerText = "Modell: Heavy (Nøyaktig)";
+              switchModelButton.classList.add("heavy-mode");
+          } else if (currentModel === "lite") {
+              switchModelButton.innerText = "Modell: Lite (Rask)";
+              switchModelButton.classList.add("lite-mode");
+          } else {
+              switchModelButton.innerText = "Modell: Begge (Overlay)";
+              switchModelButton.classList.add("both-mode");
+          }
+      });
+
+      // --- 6. LOAD THE MODEL ON START ---
+      initializeApp(); // Last inn BEGGE modellene
+
+  </script>
+</body>
+</html>
